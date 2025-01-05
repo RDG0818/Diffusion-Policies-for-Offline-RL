@@ -96,14 +96,17 @@ class Diffusion_QL(object):
         self.update_ema_every = update_ema_every
 
         self.critic = Critic(state_dim, action_dim).to(device)
+        self.critic2 = Critic(state_dim, action_dim).to(device)
         self.critic_target = copy.deepcopy(self.critic)
+        self.critic2_target = copy.deepcopy(self.critic)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.critic2_optimizer = torch.optim.Adam(self.critic2.parameters(), lr=3e-4)
 
         if lr_decay: # Added second actor to lr scheduler
             self.actor_lr_scheduler = CosineAnnealingLR(self.actor_optimizer, T_max=lr_maxt, eta_min=0.)
-            if self.dual_diffusion:
-                self.actor2_lr_scheduler = CosineAnnealingLR(self.actor2_optimizer, T_max=lr_maxt, eta_min=0.)
+            self.actor2_lr_scheduler = CosineAnnealingLR(self.actor2_optimizer, T_max=lr_maxt, eta_min=0.)
             self.critic_lr_scheduler = CosineAnnealingLR(self.critic_optimizer, T_max=lr_maxt, eta_min=0.)
+            self.critic2_lr_scheduler = CosineAnnealingLR(self.critic2_optimizer, T_max=lr_maxt, eta_min=0.)
 
         self.state_dim = state_dim
         self.max_action = max_action
@@ -126,15 +129,19 @@ class Diffusion_QL(object):
 
         metric = {'bc_loss': [], 'bc_loss2': [], 'min_loss': [], 'ql_loss': [], 'actor_loss': [], 'critic_loss': []}
         for _ in range(iterations):
+            if self.step % 1000 == 0: print(f"Epoch {self.step // 1000}")
             # Sample replay buffer / batch
             state, action, next_state, reward, not_done, source = replay_buffer.sample(batch_size)
 
             """ Q Training """
             current_q1, current_q2 = self.critic(state, action)
+            current_q3, current_q4 = self.critic2(state, action)
             q_vals = torch.minimum(current_q1, current_q2).flatten()
+            q_vals2 = torch.minimum(current_q3, current_q4).flatten()
+            q_vals3 = (q_vals + q_vals2)/2
             temp = 0.00001 + (0.0000025) * self.step
             if temp > 1: temp = 1
-            probs = torch.softmax(q_vals/temp, dim=0)
+            probs = torch.softmax(q_vals3/temp, dim=0)
             all_indices = torch.arange(len(q_vals))
             top_indices = torch.multinomial(probs, batch_size//2, replacement=False)
             mask = torch.ones_like(all_indices, dtype=bool)
@@ -156,22 +163,29 @@ class Diffusion_QL(object):
                 target_q2 = target_q2.view(batch_size, 10).max(dim=1, keepdim=True)[0]
                 target_q = torch.min(target_q1, target_q2)
             else:
+                next_action = self.ema_model(next_state[top_indices])
+                next_action2 = self.ema_model2(next_state[bottom_indices])
 
-                next_action = torch.zeros_like(action)
-                next_action[top_indices] = self.ema_model(next_state[top_indices])
-                next_action[bottom_indices] = self.ema_model2(next_state[bottom_indices])
-                target_q1, target_q2 = self.critic_target(next_state, next_action)
+                target_q1, target_q2 = self.critic_target(next_state[top_indices], next_action)
                 target_q = torch.min(target_q1, target_q2)
 
-            target_q = (reward + not_done * self.discount * target_q).detach()
+                target_q3, target_q4 = self.critic2_target(next_state[bottom_indices], next_action2)
+                target_q5 = torch.min(target_q3, target_q4)
 
-            critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
+            target_q = (reward[top_indices] + not_done[top_indices] * self.discount * target_q).detach()
+            target_q6 = (reward[bottom_indices] + not_done[bottom_indices] * self.discount * target_q5).detach()
+
+            critic_loss = F.mse_loss(current_q1[top_indices], target_q) + F.mse_loss(current_q2[top_indices], target_q)
+            critic2_loss = F.mse_loss(current_q3[bottom_indices], target_q6) + F.mse_loss(current_q4[bottom_indices], target_q6)
 
             self.critic_optimizer.zero_grad()
+            self.critic2_optimizer.zero_grad()
             critic_loss.backward()
+            critic2_loss.backward()
             if self.grad_norm > 0:
                 critic_grad_norms = nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=self.grad_norm, norm_type=2)
             self.critic_optimizer.step()
+            self.critic2_optimizer.step()
 
             """ Policy Training """
             bc_loss_tensor = self.actor.loss(action[top_indices], state[top_indices]) # In ideal, this results in perfect classification
@@ -188,7 +202,7 @@ class Diffusion_QL(object):
             actor_loss = bc_loss + q_loss
 
             new_action2 = self.actor2(state[bottom_indices])
-            q1_new_action2, q2_new_action2 = self.critic(state[bottom_indices], new_action2)
+            q1_new_action2, q2_new_action2 = self.critic2(state[bottom_indices], new_action2)
             if np.random.uniform() > 0.5:
                 q_loss2 = - q1_new_action2.mean() / q2_new_action2.abs().mean().detach()
             else:
@@ -213,12 +227,14 @@ class Diffusion_QL(object):
 
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+            for param, target_param in zip(self.critic2.parameters(), self.critic2_target.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
             self.step += 1
 
             """ Log """
 
-            #metric['actor_loss'].append(actor_loss.item())
+            metric['actor_loss'].append(actor_loss.item())
             metric['bc_loss'].append(bc_loss.item())
             #metric['ql_loss'].append(q_loss.item())
             metric['critic_loss'].append(critic_loss.item())
@@ -231,6 +247,7 @@ class Diffusion_QL(object):
             if self.dual_diffusion:
                 self.actor2_lr_scheduler.step()
             self.critic_lr_scheduler.step()
+            self.critic2_lr_scheduler.step()
 
         return metric
 
