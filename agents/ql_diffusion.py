@@ -131,10 +131,16 @@ class Diffusion_QL(object):
 
             """ Q Training """
             current_q1, current_q2 = self.critic(state, action)
-            q_vals = ((current_q1 + current_q2) / 2).flatten()
-            top_q_values, top_indices = torch.topk(q_vals, batch_size//2)
-            bottom_q_values, bottom_indices = torch.topk(q_vals, batch_size//2, largest=False)
-            #TODO: Make next_action be half from actor 1 and half from actor 2
+            q_vals = torch.minimum(current_q1, current_q2).flatten()
+            temp = 0.00001 + (0.0000025) * self.step
+            if temp > 1: temp = 1
+            probs = torch.softmax(q_vals/temp, dim=0)
+            all_indices = torch.arange(len(q_vals))
+            top_indices = torch.multinomial(probs, batch_size//2, replacement=False)
+            mask = torch.ones_like(all_indices, dtype=bool)
+            mask[top_indices] = False
+            bottom_indices = all_indices[mask]
+
             if self.max_q_backup:
                 next_state_rpt = torch.repeat_interleave(next_state, repeats=10, dim=0)
                 
@@ -150,19 +156,16 @@ class Diffusion_QL(object):
                 target_q2 = target_q2.view(batch_size, 10).max(dim=1, keepdim=True)[0]
                 target_q = torch.min(target_q1, target_q2)
             else:
-                
-                # half = next_state.size(0) // 2
-                # next_state_first_half = next_state[:half]
-                # next_state_second_half = next_state[half:]
-                # next_action = torch.cat((self.ema_model(next_state_first_half), self.ema_model2(next_state_second_half)), dim=0)
 
-                next_action = self.ema_model(next_state[top_indices])
-                target_q1, target_q2 = self.critic_target(next_state[top_indices], next_action)
+                next_action = torch.zeros_like(action)
+                next_action[top_indices] = self.ema_model(next_state[top_indices])
+                next_action[bottom_indices] = self.ema_model2(next_state[bottom_indices])
+                target_q1, target_q2 = self.critic_target(next_state, next_action)
                 target_q = torch.min(target_q1, target_q2)
 
-            target_q = (reward[top_indices] + not_done[top_indices] * self.discount * target_q).detach()
+            target_q = (reward + not_done * self.discount * target_q).detach()
 
-            critic_loss = F.mse_loss(current_q1[top_indices], target_q) + F.mse_loss(current_q2[top_indices], target_q)
+            critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
 
             self.critic_optimizer.zero_grad()
             critic_loss.backward()
@@ -171,19 +174,10 @@ class Diffusion_QL(object):
             self.critic_optimizer.step()
 
             """ Policy Training """
-            # bc_loss_tensor = self.actor.loss(action, state, ts)
-            # bc_loss = torch.mean(bc_loss_tensor)
-
-            if self.dual_diffusion: # calculating the raw loss for the second actor and finding the minimum loss
-
-                bc_loss_tensor = self.actor.loss(action[top_indices], state[top_indices])
-                bc_loss2_tensor = self.actor2.loss(action[bottom_indices], state[bottom_indices]) 
-                #norm_q = (target_q - target_q.min()) / (target_q.max() - target_q.min())
-                # eta = torch.randint(0, 2, (batch_size,), device=self.device)
-                # min_loss = torch.mean(eta * bc_loss_tensor + (1 - eta) * bc_loss2_tensor)
-                #min_loss = torch.mean(temp * -torch.logsumexp(-torch.stack([bc_loss_tensor, bc_loss2_tensor]) / temp, dim=0))
-                bc_loss = (bc_loss_tensor).mean()
-                bc_loss2 = (bc_loss2_tensor).mean()
+            bc_loss_tensor = self.actor.loss(action[top_indices], state[top_indices]) # In ideal, this results in perfect classification
+            bc_loss2_tensor = self.actor2.loss(action[bottom_indices], state[bottom_indices]) 
+            bc_loss = (bc_loss_tensor).mean()
+            bc_loss2 = (bc_loss2_tensor).mean()
             new_action = self.actor(state[top_indices])
 
             q1_new_action, q2_new_action = self.critic(state[top_indices], new_action)
@@ -191,25 +185,25 @@ class Diffusion_QL(object):
                 q_loss = - q1_new_action.mean() / q2_new_action.abs().mean().detach()
             else:
                 q_loss = - q2_new_action.mean() / q1_new_action.abs().mean().detach()
-            actor_loss = bc_loss + 0 * q_loss
+            actor_loss = bc_loss + q_loss
 
-            # new_action2 = self.actor2(state)
-            # q1_new_action2, q2_new_action2 = self.critic(state, new_action2)
-            # if np.random.uniform() > 0.5:
-            #     q_loss2 = - q1_new_action2.mean() / q2_new_action2.abs().mean().detach()
-            # else:
-            #     q_loss2 = - q2_new_action2.mean() / q1_new_action2.abs().mean().detach()
-            # actor2_loss = bc_loss2 - self.eta * q_loss2 
+            new_action2 = self.actor2(state[bottom_indices])
+            q1_new_action2, q2_new_action2 = self.critic(state[bottom_indices], new_action2)
+            if np.random.uniform() > 0.5:
+                q_loss2 = - q1_new_action2.mean() / q2_new_action2.abs().mean().detach()
+            else:
+                q_loss2 = - q2_new_action2.mean() / q1_new_action2.abs().mean().detach()
+            actor2_loss = bc_loss2 + q_loss2 
 
             self.actor_optimizer.zero_grad()
             if self.grad_norm > 0: 
                 actor_grad_norms = nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=self.grad_norm, norm_type=2)
-            actor_loss.backward(retain_graph=True)
+            actor_loss.backward()
             self.actor_optimizer.step()
     
             if self.dual_diffusion:
                 self.actor2_optimizer.zero_grad()
-                bc_loss2.backward()
+                actor2_loss.backward()
                 self.actor2_optimizer.step()
 
 
@@ -223,14 +217,6 @@ class Diffusion_QL(object):
             self.step += 1
 
             """ Log """
-            if log_writer is not None:
-                if self.grad_norm > 0:
-                    log_writer.add_scalar('Actor Grad Norm', actor_grad_norms.max().item(), self.step)
-                    log_writer.add_scalar('Critic Grad Norm', critic_grad_norms.max().item(), self.step)
-                log_writer.add_scalar('BC Loss', bc_loss.item(), self.step)
-                #log_writer.add_scalar('QL Loss', q_loss.item(), self.step)
-                log_writer.add_scalar('Critic Loss', critic_loss.item(), self.step)
-                log_writer.add_scalar('Target_Q Mean', target_q.mean().item(), self.step)
 
             #metric['actor_loss'].append(actor_loss.item())
             metric['bc_loss'].append(bc_loss.item())

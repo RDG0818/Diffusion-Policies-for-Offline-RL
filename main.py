@@ -101,33 +101,15 @@ def train_agent(env, state_dim, action_dim, max_action, device, output_dir, args
         # Logging
         #TODO: Remove other logging system
         utils.print_banner(f"Train step: {training_iters}", separator="*", num_star=90)
-        logger.record_tabular('Trained Epochs', curr_epoch)
-        logger.record_tabular('BC Loss', np.mean(loss_metric['bc_loss']))
-        logger.record_tabular('QL Loss', np.mean(loss_metric['ql_loss']))
-        logger.record_tabular('Actor Loss', np.mean(loss_metric['actor_loss']))
-        logger.record_tabular('Critic Loss', np.mean(loss_metric['critic_loss']))
-        wandb.log({'BC Loss': np.mean(loss_metric['bc_loss']),
-                   'BC Loss 2': np.sum(loss_metric['bc_loss2']),
-                   'Min Loss': np.mean(loss_metric['min_loss']),
-                   'QL Loss': np.mean(loss_metric['ql_loss']), 
-                   'Actor Loss': np.mean(loss_metric['actor_loss']),
-                   'Critic Loss': np.mean(loss_metric['critic_loss'])})
-        logger.dump_tabular()
+        print('Trained Epochs', curr_epoch)
+        print('Actor Loss', np.mean(loss_metric['actor_loss']))
+        print('Critic Loss', np.mean(loss_metric['critic_loss']))
+
 
         # Evaluation
         eval_res, eval_res_std, eval_norm_res, eval_norm_res_std = eval_policy(agent, args.env_name, args.seed,
                                                                                eval_episodes=args.eval_episodes)
-        evaluations.append([eval_res, eval_res_std, eval_norm_res, eval_norm_res_std,
-                            np.mean(loss_metric['bc_loss']), np.mean(loss_metric['ql_loss']),
-                            np.mean(loss_metric['actor_loss']), np.mean(loss_metric['critic_loss']),
-                            curr_epoch])
-        np.save(os.path.join(output_dir, "eval"), evaluations)
-        #TODO: Add this other stuff to wandb and remove logger stuff
-        logger.record_tabular('Average Episodic Reward', eval_res)
-        logger.record_tabular('Average Episodic N-Reward', eval_norm_res)
-        wandb.log({'Average Episodic Reward': eval_res, 
-                   'Average Episodic N-Reward': eval_norm_res})
-        logger.dump_tabular()
+
         
         # # Checking dual diffusions ability to differentiate sources 
         eval_classifier(agent, data_sampler, batch_size=256)
