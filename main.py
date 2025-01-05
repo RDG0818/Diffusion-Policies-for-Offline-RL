@@ -45,7 +45,7 @@ hyperparameters = {
 
 def train_agent(env, state_dim, action_dim, max_action, device, output_dir, args):
     # Load buffer
-    dataset = mix_datasets('hopper-medium-v2', 'hopper-expert-v2')
+    dataset = mix_datasets('walker2d-medium-v2', 'walker2d-expert-v2')
     #dataset = d4rl.qlearning_dataset(env)
     data_sampler = Data_Sampler(dataset, device, args.reward_tune, True)
     utils.print_banner('Loaded buffer')

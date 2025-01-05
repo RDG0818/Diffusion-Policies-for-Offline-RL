@@ -139,8 +139,8 @@ class Diffusion_QL(object):
             q_vals = torch.minimum(current_q1, current_q2).flatten()
             q_vals2 = torch.minimum(current_q3, current_q4).flatten()
             q_vals3 = (q_vals + q_vals2)/2
-            temp = 0.00001 + (0.0000025) * self.step
-            if temp > 1: temp = 1
+            temp = 0.00001 + (0.000001) * self.step
+            if temp > 0.5: temp = 0.5
             probs = torch.softmax(q_vals3/temp, dim=0)
             all_indices = torch.arange(len(q_vals))
             top_indices = torch.multinomial(probs, batch_size//2, replacement=False)
